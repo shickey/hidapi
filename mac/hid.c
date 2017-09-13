@@ -433,8 +433,6 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 		    (product_id == 0x0 || product_id == dev_pid)) {
 			struct hid_device_info *tmp;
 			io_object_t iokit_dev;
-			kern_return_t res;
-			io_string_t path;
 
 			/* VID/PID match. Create the record. */
 			tmp = malloc(sizeof(struct hid_device_info));
@@ -453,13 +451,26 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 			/* Fill out the record */
 			cur_dev->next = NULL;
 
-			/* Fill in the path (IOService plane) */
-			iokit_dev = hidapi_IOHIDDeviceGetService(dev);
-			res = IORegistryEntryGetPath(iokit_dev, kIOServicePlane, path);
-			if (res == KERN_SUCCESS)
-				cur_dev->path = strdup(path);
-			else
+			/* Fill in the path
+			 * 
+			 * NOTE:
+			 * For macOS >= 10.10, the path returned by IORegistryEntryGetPath() is no longer
+			 * unique for HID devices connected over Bluetooth.
+			 *
+			 * Workaround:
+			 * Use IORegistryEntryGetRegistryEntryID() to obtain the unique registry identifier
+			 * and use that as the 'path' for the device.
+			 */
+			uint64_t entry_id;
+			IOReturn result = IORegistryEntryGetRegistryEntryID(iokit_dev, &entry_id);
+			if (result == kIOReturnSuccess) {
+				char *entry_id_path = malloc(sizeof(char) * 64);
+				sprintf(entry_id_path, "%" PRIu64, entry_id);
+				cur_dev->path = entry_id_path;
+			}
+			else {
 				cur_dev->path = strdup("");
+			}
 
 			/* Serial Number */
 			get_serial_number(dev, buf, BUF_LEN);
@@ -689,19 +700,27 @@ hid_device * HID_API_EXPORT hid_open_path(const char *path)
 	if (hid_init() < 0)
 		return NULL;
 
-	/* Get the IORegistry entry for the given path */
-	entry = IORegistryEntryFromPath(kIOMasterPortDefault, path);
-	if (entry == MACH_PORT_NULL) {
-		/* Path wasn't valid (maybe device was removed?) */
-		goto return_error;
-	}
-
-	/* Create an IOHIDDevice for the entry */
-	dev->device_handle = IOHIDDeviceCreate(kCFAllocatorDefault, entry);
-	if (dev->device_handle == NULL) {
-		/* Error creating the HID device */
-		goto return_error;
-	}
+	/* Get the IOHIDDeviceRef for the given path
+	 *
+	 * NOTE:
+	 * The 'path' here contains the unique registry identifier.
+	 * See note in hid_enumerate() why this is used instead of the registry path.
+	 */
+	uint64_t entry_id;
+    sscanf(path, "%" SCNu64, &entry_id);
+    
+    IOHIDManagerSetDeviceMatching(hid_mgr, IORegistryEntryIDMatching(entry_id));
+    CFSetRef device_set = IOHIDManagerCopyDevices(hid_mgr);
+    CFIndex num_devices = CFSetGetCount(device_set);
+    if (num_devices == 0) {
+    	/* Unable to find the device. Maybe it doesn't exist anymore? */
+    	goto return_error;
+    }
+    /* Convert to a C array for easy access */
+    IOHIDDeviceRef *device_array = calloc(num_devices, sizeof(IOHIDDeviceRef));
+    CFSetGetValues(device_set, (const void **) device_array);
+    
+    dev->device_handle = device_array[0];
 
 	/* Open the IOHIDDevice */
 	IOReturn ret = IOHIDDeviceOpen(dev->device_handle, kIOHIDOptionsTypeSeizeDevice);
