@@ -461,6 +461,8 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 			 * Use IORegistryEntryGetRegistryEntryID() to obtain the unique registry identifier
 			 * and use that as the 'path' for the device.
 			 */
+			iokit_dev = hidapi_IOHIDDeviceGetService(dev);
+			
 			uint64_t entry_id;
 			IOReturn result = IORegistryEntryGetRegistryEntryID(iokit_dev, &entry_id);
 			if (result == kIOReturnSuccess) {
